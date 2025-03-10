@@ -1,12 +1,14 @@
+TARGET = countdown
+
 CC = gcc
 CFLAGS = -Wall -std=c17 -g
 
-all: countdown
+all: $(TARGET)
 
-countdown: countdown.c
-	$(CC) $(CFLAGS) countdown.c -o countdown
+$(TARGET): $(TARGET).c
+	$(CC) $(CFLAGS) -o $(TARGET) $(TARGET).c
 
 clean:
-	rm -f countdown
+	rm -f $(TARGET)
 
-.PHONY: all countdown clean
+.PHONY: all clean
