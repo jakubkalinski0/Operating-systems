@@ -1,3 +1,8 @@
-//
-// Created by Jakub Kalinski on 20.03.2025.
-//
+int collatz_conjecture(int input) {
+    if (input % 2 == 0) {
+        return input/2;
+    }
+    else {
+        return input*3 + 1;
+    }
+}
