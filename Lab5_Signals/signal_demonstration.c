@@ -5,63 +5,69 @@
 #include <signal.h>
 #include <unistd.h>
 
-// Handler dla sygnału SIGUSR1
+// Handler for SIGUSR1 signal
 void sigusr1_handler(int sig) {
-    printf("Otrzymano sygnał SIGUSR1 (%d)\n", sig);
+    printf("Received SIGUSR1 signal (%d)\n", sig);
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
-        fprintf(stderr, "Użycie: %s <none|ignore|handler|mask>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <none|ignore|handler|mask>\n", argv[0]);
         return 1;
     }
 
-    sigset_t mask;
+    sigset_t mask_set; // Renamed to avoid conflict with 'mask' argument in some functions
     sigset_t pending;
     struct sigaction sa;
 
     printf("PID: %d\n", getpid());
 
     if (strcmp(argv[1], "none") == 0) {
-        printf("Tryb: none - używanie domyślnej reakcji na sygnał\n");
-
+        printf("Mode: none - using default signal reaction\n");
+        // Default action for SIGUSR1 is to terminate the process.
     } else if (strcmp(argv[1], "ignore") == 0) {
-        printf("Tryb: ignore - ignorowanie sygnału\n");
+        printf("Mode: ignore - ignoring the signal\n");
         signal(SIGUSR1, SIG_IGN);
 
     } else if (strcmp(argv[1], "handler") == 0) {
-        printf("Tryb: handler - instalacja handlera\n");
+        printf("Mode: handler - installing a handler\n");
         memset(&sa, 0, sizeof(sa));
         sa.sa_handler = sigusr1_handler;
-        sigemptyset(&sa.sa_mask);
+        sigemptyset(&sa.sa_mask); // Initialize the mask for the handler
         sigaction(SIGUSR1, &sa, NULL);
 
     } else if (strcmp(argv[1], "mask") == 0) {
-        printf("Tryb: mask - maskowanie sygnału\n");
-        sigemptyset(&mask);
-        sigaddset(&mask, SIGUSR1);
-        sigprocmask(SIG_BLOCK, &mask, NULL);
+        printf("Mode: mask - masking the signal\n");
+        sigemptyset(&mask_set);
+        sigaddset(&mask_set, SIGUSR1);
+        sigprocmask(SIG_BLOCK, &mask_set, NULL);
 
     } else {
-        fprintf(stderr, "Nieznany argument: %s\n", argv[1]);
+        fprintf(stderr, "Unknown argument: %s\n", argv[1]);
         return 1;
     }
 
-    printf("Wysyłanie sygnału SIGUSR1 do siebie...\n");
+    printf("Sending SIGUSR1 signal to self...\n");
     raise(SIGUSR1);
-    printf("Sygnał został wysłany\n");
+    // If the signal was not ignored or masked, and if the default action is termination,
+    // or if the handler calls exit(), the program might terminate before this line.
+    printf("Signal has been sent\n");
 
-    // Sprawdzanie czy sygnał jest oczekujący (tylko dla trybu mask)
     if (strcmp(argv[1], "mask") == 0) {
-        // Sprawdzamy czy sygnał jest widoczny w zbiorze sygnałów oczekujących
         sigpending(&pending);
         if (sigismember(&pending, SIGUSR1)) {
-            printf("Sygnał SIGUSR1 jest oczekujący\n");
+            printf("SIGUSR1 signal is pending\n");
         } else {
-            printf("Sygnał SIGUSR1 NIE jest oczekujący\n");
+            printf("SIGUSR1 signal is NOT pending\n");
+            // This might happen if the signal was somehow processed before sigpending
+            // or if there's a race condition, though less likely here.
+            // More likely, if the signal was unblocked and handled (e.g. default termination).
         }
     }
 
-    printf("Koniec programu\n");
+    // If the 'none' mode was chosen, the program likely terminated due to SIGUSR1's default action.
+    // If 'handler' mode was chosen and the handler exits, it also won't reach here.
+    // If 'ignore' or 'mask' was chosen, it should reach here.
+    printf("End of program\n");
     return 0;
 }

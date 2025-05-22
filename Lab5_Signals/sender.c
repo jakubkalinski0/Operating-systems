@@ -3,38 +3,38 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
+#include <string.h>
 
 volatile sig_atomic_t confirmation_received = 0;
 volatile int confirmed_mode = 0;
 
-// Handler dla SIGUSR1 - potwierdzenie odbioru
 void sigusr1_handler(int sig, siginfo_t *info, void *ucontext) {
+    (void)sig;
+    (void)ucontext;
     confirmation_received = 1;
     confirmed_mode = info->si_value.sival_int;
-    printf("Otrzymano potwierdzenie odbioru. Catcher jest w trybie: %d\n", confirmed_mode);
+    printf("Received confirmation. Catcher is in mode: %d\n", confirmed_mode);
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-        fprintf(stderr, "Użycie: %s <PID_catchera> <tryb 1-5>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <catcher_PID> <mode 1-5>\n", argv[0]);
         return 1;
     }
 
-    // Parsowanie argumentów
     pid_t catcher_pid = atoi(argv[1]);
     int mode = atoi(argv[2]);
 
     if (catcher_pid <= 0) {
-        fprintf(stderr, "Nieprawidłowy PID: %s\n", argv[1]);
+        fprintf(stderr, "Invalid PID: %s\n", argv[1]);
         return 1;
     }
 
     if (mode < 1 || mode > 5) {
-        fprintf(stderr, "Nieprawidłowy tryb. Dozwolone tryby: 1-5\n");
+        fprintf(stderr, "Invalid mode. Allowed modes: 1-5\n");
         return 1;
     }
 
-    // Konfiguracja handlera dla SIGUSR1
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = sigusr1_handler;
@@ -42,44 +42,44 @@ int main(int argc, char *argv[]) {
     sigemptyset(&sa.sa_mask);
 
     if (sigaction(SIGUSR1, &sa, NULL) == -1) {
-        perror("Błąd przy ustawianiu handlera dla SIGUSR1");
+        perror("Error setting handler for SIGUSR1");
         return 1;
     }
 
-    // Blokowanie sygnału SIGUSR1
+    // Block SIGUSR1 signal
     sigset_t mask, oldmask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGUSR1);
     sigprocmask(SIG_BLOCK, &mask, &oldmask);
 
-    // Wysłanie sygnału z określonym trybem
-    printf("Wysyłanie trybu %d do catchera (PID: %d)...\n", mode, catcher_pid);
+    // Send signal with the specified mode
+    printf("Sending mode %d to catcher (PID: %d)...\n", mode, catcher_pid);
 
     union sigval value;
     value.sival_int = mode;
 
     if (sigqueue(catcher_pid, SIGUSR1, value) == -1) {
-        perror("Błąd przy wysyłaniu sygnału");
+        perror("Error sending signal");
         return 1;
     }
 
-    // Czekanie na potwierdzenie
-    printf("Czekam na potwierdzenie...\n");
+    // Wait for confirmation
+    printf("Waiting for confirmation...\n");
 
-    // Tworzymy maskę dla sigsuspend
+    // Create a mask for sigsuspend
     sigset_t suspend_mask;
     sigfillset(&suspend_mask);
-    sigdelset(&suspend_mask, SIGUSR1);
+    sigdelset(&suspend_mask, SIGUSR1); // Only unblock SIGUSR1
 
-    // Czekamy na potwierdzenie przy użyciu sigsuspend
+    // Wait for confirmation using sigsuspend
     while (!confirmation_received) {
         sigsuspend(&suspend_mask);
     }
 
-    // Przywracanie starej maski
+    // Restore old mask
     sigprocmask(SIG_SETMASK, &oldmask, NULL);
 
-    printf("Potwierdzenie otrzymane. Kończę pracę.\n");
+    printf("Confirmation received. Exiting.\n");
 
     return 0;
 }
