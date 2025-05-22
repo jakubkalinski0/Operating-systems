@@ -1,21 +1,20 @@
-CC=gcc
-BUILD_DIR=build
-CFLAGS := -Wall
-TIME := /usr/bin/time
+CC = gcc
+CFLAGS = -Wall -std=c11
+LDFLAGS = -lm
+TIME = /usr/bin/time
 
-.PHONY: all clean
+all: integrate
 
-all: integral
+integrate: integrate.c
+	$(CC) $(CFLAGS) -o integrate integrate.c $(LDFLAGS)
 
-integral: integral.c
-	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $(BUILD_DIR)/$@ $< -lm
-
-test: integral
-	@echo "20 processes	" `$(TIME) -f '%e' ./$(BUILD_DIR)/integral 0.0000000001 20 2>&1` "[s]"
-	@echo "10 processes " `$(TIME) -f '%e' ./$(BUILD_DIR)/integral 0.0000000001 10 2>&1` "[s]"
-	@echo "5  processes " `$(TIME) -f '%e' ./$(BUILD_DIR)/integral 0.0000000001 5  2>&1`  "[s]"
-	@echo "1  process   " `$(TIME) -f '%e' ./$(BUILD_DIR)/integral 0.0000000001 1  2>&1`  "[s]"
+test: integrate
+	@echo "20" `$(TIME) -f '%e' ./integrate 0.000000001 20 2>&1` "[s]"
+	@echo "10" `$(TIME) -f '%e' ./integrate 0.000000001 10 2>&1` "[s]"
+	@echo "5" `$(TIME) -f '%e' ./integrate 0.000000001 5  2>&1`  "[s]"
+	@echo "1" `$(TIME) -f '%e' ./integrate 0.000000001 1  2>&1`  "[s]"
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -f integrate
+
+.PHONY: all clean

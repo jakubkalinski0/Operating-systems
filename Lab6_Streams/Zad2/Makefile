@@ -1,27 +1,16 @@
 CC=gcc
-BUILD_DIR=build
 CFLAGS := -Wall
-TIME := /usr/bin/time
 
-.PHONY: all clean
+all:  int man
 
+man: man.c
+	$(CC) $(CFLAGS) -o man man.c
 
-all: integral_calculator integral_manager
-
-integral_manager: integral_manager.c
-	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $(BUILD_DIR)/$@ $<
-
-integral_calculator: integral_calculator.c
-	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $(BUILD_DIR)/$@ $<
-
-run_calculator: integral_calculator
-	./$(BUILD_DIR)/integral_calculator
-
-run_manager: integral_manager
-	./$(BUILD_DIR)/integral_manager
+int: int.c
+	$(CC) $(CFLAGS) -o int int.c
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf all
 	rm -rf *.fifo
+
+.PHONY: all clean
