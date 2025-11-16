@@ -1,26 +1,28 @@
 CC=gcc
 BUILD_DIR=build
-CFLAGS := -Wall
+CFLAGS := -Wall -g -pthread
+LDFLAGS := -lrt
 
-.PHONY: all clean
+.PHONY: all clean run_client run_server
 
-all: client server
+all: $(BUILD_DIR)/client $(BUILD_DIR)/server
 
-client: client.c
+$(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $(BUILD_DIR)/$@ $<
 
-server: server.c
-	rm -rf /dev/mqueue/*
-	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $(BUILD_DIR)/$@ $<
+$(BUILD_DIR)/client: client.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-run_client: client
+$(BUILD_DIR)/server: server.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+run_client: $(BUILD_DIR)/client
 	./$(BUILD_DIR)/client
 
-run_server: server
+run_server: $(BUILD_DIR)/server
 	./$(BUILD_DIR)/server
 
 clean:
-	rm -f /dev/mqueue/*
+	rm -f /dev/mqueue/simple_chat_server_queue
+	rm -f /dev/mqueue/simple_chat_client_queue_*
 	rm -rf $(BUILD_DIR)

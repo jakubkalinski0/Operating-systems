@@ -9,181 +9,270 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <errno.h>
+#include <sys/wait.h>
 
 #define MESSAGE_BUFFER_SIZE 2048
 #define SERVER_QUEUE_NAME "/simple_chat_server_queue"
 #define CLIENT_QUEUE_NAME_SIZE 40
 #define MAX_CLIENTS_COUNT 3
 
-/* Enum for defining message type */
 typedef enum {
-    INIT, 
+    INIT,
     IDENTIFIER,
     MESSAGE_TEXT,
     CLIENT_CLOSE
 } message_type_t;
 
-/* structure defined for the message */
 typedef struct {
     message_type_t type;
-
     int identifier;
     char text[MESSAGE_BUFFER_SIZE];
 } message_t;
 
-/** signal handler to exit from loop */
-volatile bool should_close = false;
+volatile sig_atomic_t should_close = false;
 
 void SIGNAL_handler(int signum) {
+    char msg_prefix[50];
+    snprintf(msg_prefix, sizeof(msg_prefix), "Client (PID %d): Caught signal %d", getpid(), signum);
+    write(STDERR_FILENO, msg_prefix, strlen(msg_prefix));
+    char newline = '\n';
+    write(STDERR_FILENO, &newline, 1);
+
     should_close = true;
 }
 
-// helper macro for getting minimum of two values
 #define MIN(a, b) (a < b ? a : b)
 
 int main() {
-    /* create unique identifier for client queue */
     pid_t pid = getpid();
     char queue_name[CLIENT_QUEUE_NAME_SIZE] = {0};
-    sprintf(queue_name, "/simple_chat_client_queue_%d", pid);
+    snprintf(queue_name, CLIENT_QUEUE_NAME_SIZE, "/simple_chat_client_queue_%d", pid);
 
-    /**
-     * Fill in structure speicifing options for creation of client queue
-    */
+    struct sigaction sa;
+    sa.sa_handler = SIGNAL_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("Client: Error setting SIGINT handler");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("Client: Error setting SIGTERM handler");
+        exit(EXIT_FAILURE);
+    }
+
     struct mq_attr attributes = {
         .mq_flags = 0,
         .mq_msgsize = sizeof(message_t),
         .mq_maxmsg = 10
     };
-    
-    /**
-     * Create client queue with options for server -> client communication
-    */
-    mqd_t mq_client_descriptor = mq_open(queue_name, O_RDWR | O_CREAT,  S_IRUSR | S_IWUSR, &attributes);
-    if(mq_client_descriptor < 0)
-        perror("mq_open client");
 
-    /**
-     * Try opening server queue for client -> server communication
-    */
-    mqd_t mq_server_descriptor = mq_open(SERVER_QUEUE_NAME, O_RDWR, S_IRUSR | S_IWUSR, NULL);
-    if(mq_server_descriptor < 0) {
-        printf("Most likely server not opened!\n");
-        perror("mq_open server");
+    mqd_t mq_client_descriptor = mq_open(queue_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR, &attributes);
+    if (mq_client_descriptor < 0) {
+        perror("mq_open client");
+        exit(EXIT_FAILURE);
     }
 
-    /**
-     * Setup INIT message with client queue name
-    */
+    mqd_t mq_server_descriptor = mq_open(SERVER_QUEUE_NAME, O_WRONLY);
+    if (mq_server_descriptor < 0) {
+        printf("Most likely server not opened!\n");
+        perror("mq_open server");
+        mq_close(mq_client_descriptor);
+        mq_unlink(queue_name);
+        exit(EXIT_FAILURE);
+    }
+
     message_t message_init = {
         .type = INIT,
         .identifier = -1
     };
+    strncpy(message_init.text, queue_name, MESSAGE_BUFFER_SIZE - 1);
+    message_init.text[MESSAGE_BUFFER_SIZE - 1] = '\0';
 
-    // copy queue name to message buffer, MIN is used to prevent buffer overflow
-    memcpy(message_init.text, queue_name, MIN(CLIENT_QUEUE_NAME_SIZE - 1, strlen(queue_name)));
 
-    // send INIT message to server
-    if(mq_send(mq_server_descriptor, (char*)&message_init, sizeof(message_init), 10) < 0){
+    if (mq_send(mq_server_descriptor, (char*)&message_init, sizeof(message_init), 10) < 0) {
         perror("mq_send init");
+        mq_close(mq_server_descriptor);
+        mq_close(mq_client_descriptor);
+        mq_unlink(queue_name);
+        exit(EXIT_FAILURE);
     }
 
-    // create pipe for communication between parent (writing to server) and child (reading from server) processes
     int to_parent_pipe[2];
-    if(pipe(to_parent_pipe) < 0)
+    if (pipe(to_parent_pipe) < 0) {
         perror("pipe");
-
-    // register signal handler for closing client to all signals
-    for (int sig = 1; sig < SIGRTMAX; sig++) {
-        signal(sig, SIGNAL_handler);
+        mq_close(mq_server_descriptor);
+        mq_close(mq_client_descriptor);
+        mq_unlink(queue_name);
+        exit(EXIT_FAILURE);
     }
 
-    // create child process for listening to messages from server
+
     pid_t listener_pid = fork();
-    if (listener_pid < 0)
+    if (listener_pid < 0) {
         perror("fork listener");
-    else if (listener_pid == 0) {
-        // close reading end of the pipe
+        close(to_parent_pipe[0]);
+        close(to_parent_pipe[1]);
+        mq_close(mq_server_descriptor);
+        mq_close(mq_client_descriptor);
+        mq_unlink(queue_name);
+        exit(EXIT_FAILURE);
+    } else if (listener_pid == 0) {
         close(to_parent_pipe[0]);
         message_t receive_message;
-        while(!should_close) {
-            // receive message from server (block until message is received)
-            mq_receive(mq_client_descriptor, (char*)&receive_message, sizeof(receive_message), NULL);
-            switch(receive_message.type) {
-                /* we received standard message from server with text data */
-                case MESSAGE_TEXT:
-                    printf("Received from id: %d message: %s\n", receive_message.identifier, receive_message.text);
+
+        printf("Listener process (PID %d) started.\n", getpid());
+        while (!should_close) {
+            ssize_t bytes_read = mq_receive(mq_client_descriptor, (char*)&receive_message, sizeof(message_t), NULL);
+            if (bytes_read < 0) {
+                if (errno == EINTR && should_close) {
                     break;
-                /* we received client identifier from server */
-                case IDENTIFIER:
-                    printf("Received identifier from server: %d\n", receive_message.identifier);
-                    // write client identifier to parent process
-                    write(to_parent_pipe[1], &receive_message.identifier, sizeof(receive_message.identifier));
-                    break;
-                default:
-                    printf("Unknown message type in client queue: %d", receive_message.type);
-                    break;
+                }
+                if (should_close) break;
+                perror("mq_receive in child");
+                break;
+            }
+
+            if (bytes_read == sizeof(message_t)) {
+                 switch (receive_message.type) {
+                    case MESSAGE_TEXT:
+                        printf("Received from id: %d message: %s\n", receive_message.identifier, receive_message.text);
+                        break;
+                    case IDENTIFIER:
+                        printf("Received identifier from server: %d\n", receive_message.identifier);
+                        if (write(to_parent_pipe[1], &receive_message.identifier, sizeof(receive_message.identifier)) < 0) {
+                            perror("Child: write to pipe error");
+                        }
+                        break;
+                    default:
+                        printf("Unknown message type in client queue: %d\n", receive_message.type);
+                        break;
+                }
+            } else if (bytes_read > 0) {
+                 printf("Child: Received partial message (%zd bytes), expected %zu\n", bytes_read, sizeof(message_t));
             }
         }
-        printf("Exiting from receive loop\n");
+        printf("Listener process (PID %d) exiting from receive loop.\n", getpid());
+        close(to_parent_pipe[1]);
+        mq_close(mq_client_descriptor);
         exit(0);
     } else {
-        //close writing end of the pipe
         close(to_parent_pipe[1]);
         int identifier = -1;
 
-        // wait and read client identifier from child process
-        if(read(to_parent_pipe[0], &identifier, sizeof(identifier)) < 0)
-            perror("read identifier");
+        printf("Parent process (PID %d) waiting for identifier...\n", getpid());
+        ssize_t read_bytes_pipe = read(to_parent_pipe[0], &identifier, sizeof(identifier));
+        if (read_bytes_pipe <= 0) {
+            if (read_bytes_pipe == 0) {
+                fprintf(stderr, "Parent: read identifier from pipe: EOF (child closed pipe prematurely)\n");
+            } else {
+                perror("Parent: read identifier from pipe");
+            }
+            should_close = true;
+            if (listener_pid > 0) kill(listener_pid, SIGTERM);
+        } else {
+            printf("Parent process (PID %d) received identifier: %d\n", getpid(), identifier);
+        }
+        close(to_parent_pipe[0]);
 
         char* buffer = NULL;
-        while(!should_close) {
-            // get message queue attributes
-            mq_getattr(mq_server_descriptor, &attributes);
-            // check if we can send more messages to server
-            if(attributes.mq_curmsgs >= attributes.mq_maxmsg) {
-                printf("Server is busy, please wait\n");
+        size_t buffer_len = 0;
+
+        while (!should_close && identifier != -1) {
+            struct mq_attr current_server_attrs;
+            if (mq_getattr(mq_server_descriptor, &current_server_attrs) == -1) {
+                 if (errno == EINTR && should_close) break;
+                 if (should_close) break;
+                 perror("mq_getattr server in parent");
+                 break;
+            }
+
+            if (current_server_attrs.mq_curmsgs >= current_server_attrs.mq_maxmsg) {
+                printf("Server queue is full, please wait...\n");
+                sleep(1);
                 continue;
             }
-            
-            // read message from stdin
-            if(scanf("%ms", &buffer) == 1) {
-                // setup message for sending to server
-                message_t send_message = {
-                    .type = MESSAGE_TEXT,
-                    .identifier = identifier
-                };
-                // copy message to message buffer, MIN is used to prevent buffer overflow
-                memcpy(send_message.text, buffer, MIN(MESSAGE_BUFFER_SIZE - 1, strlen(buffer)));
 
-                // send message to server
-                mq_send(mq_server_descriptor, (char*)&send_message, sizeof(send_message), 10);
+            printf("Enter message: ");
+            fflush(stdout);
 
-                // free memory allocated by scanf
-                free(buffer);
-                buffer = NULL;
-            } else
-                perror("scanf input");
+            ssize_t nread = getline(&buffer, &buffer_len, stdin);
+
+            if (nread == -1) {
+                if (feof(stdin)) {
+                    printf("EOF detected, closing.\n");
+                } else if (errno == EINTR && should_close) {
+                     printf("getline interrupted by signal, closing.\n");
+                }
+                else {
+                    perror("getline input");
+                }
+                should_close = true;
+                break;
+            }
+
+            if (nread > 0 && buffer[nread - 1] == '\n') {
+                buffer[nread - 1] = '\0';
+                nread--;
+            }
+
+            if (nread == 0) {
+                printf("Empty message, not sending.\n");
+                continue;
+            }
+
+            message_t send_message = {
+                .type = MESSAGE_TEXT,
+                .identifier = identifier
+            };
+            strncpy(send_message.text, buffer, MESSAGE_BUFFER_SIZE - 1);
+            send_message.text[MESSAGE_BUFFER_SIZE - 1] = '\0';
+
+
+            if (mq_send(mq_server_descriptor, (char*)&send_message, sizeof(send_message), 10) < 0) {
+                if (errno == EINTR && should_close) {
+                    break;
+                }
+                if(should_close) break;
+                perror("mq_send to server in parent");
+                break;
+            }
+        }
+        if (buffer) {
+            free(buffer);
         }
 
-        printf("Exiting from sending loop\n");
+        printf("Parent process (PID %d) exiting from sending loop.\n", getpid());
 
-        /* If we did make connection notify server about closing */
-        if(identifier != -1){
-            /** Prepare notification for the server that client is closing */
+        if (identifier != -1) {
             message_t message_close = {
                 .type = CLIENT_CLOSE,
                 .identifier = identifier
             };
-            /* Notify server that client is closing */
-            mq_send(mq_server_descriptor, (char*)&message_close, sizeof(message_close), 10);
+            if (mq_send(mq_server_descriptor, (char*)&message_close, sizeof(message_close), 10) < 0) {
+                if (!(errno == EINTR && should_close)) {
+                    perror("mq_send CLIENT_CLOSE notification");
+                }
+            }
         }
 
-        /* Close quees  */
-        mq_close(mq_server_descriptor);
-        mq_close(mq_client_descriptor);
+        if (listener_pid > 0) {
+            if (!should_close) {
+                 kill(listener_pid, SIGTERM);
+            }
+            int status;
+            waitpid(listener_pid, &status, 0);
+            printf("Listener process (PID %d) terminated with status %d.\n", listener_pid, status);
+        }
 
-        /** Delete created queues file descriptor */
-        mq_unlink(queue_name);
+        mq_close(mq_server_descriptor);
+
+        if (mq_unlink(queue_name) == -1) {
+            perror("mq_unlink client queue");
+        }
+        printf("Client (PID %d) finished.\n", getpid());
     }
+    return 0;
 }
